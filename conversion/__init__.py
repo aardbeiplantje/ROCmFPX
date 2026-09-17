@@ -245,6 +245,7 @@ TEXT_MODEL_MAP: dict[str, str] = {
     "VLlama3ForCausalLM": "llama",
     "VoxtralForConditionalGeneration": "llama",
     "WavTokenizerDec": "wavtokenizer",
+    "Xing4_0ForCausalLM": "xing4",
     "XLMRobertaForSequenceClassification": "bert",
     "XLMRobertaModel": "bert",
     "XverseForCausalLM": "xverse",
