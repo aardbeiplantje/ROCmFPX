@@ -2610,6 +2610,18 @@ extern "C" {
             int                   sinkhorn_iters,
             float                 eps);
 
+    // Xing4.0 variant: eps goes in the Sinkhorn DENOMINATOR and `pre` gets no eps,
+    // matching Xing4_0HyperConnection.forward. Identical to the dsv4 entry point in
+    // every other respect. Kept separate so deepseek4 numerics are untouched.
+    GGML_API struct ggml_tensor * ggml_xing4_hc_split_sinkhorn(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * mixes,
+            struct ggml_tensor  * scale,
+            struct ggml_tensor  * base,
+            int                   n_hc,
+            int                   sinkhorn_iters,
+            float                 eps);
+
     GGML_API struct ggml_tensor * ggml_dsv4_hc_weighted_sum(
             struct ggml_context * ctx,
             struct ggml_tensor  * x,

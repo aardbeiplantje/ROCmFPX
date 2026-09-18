@@ -60,7 +60,10 @@ static xing4_hc_mix xing4_hc_pre(
     ggml_tensor * flat = ggml_cont(ctx, ggml_reshape_2d(ctx, x, hc_dim, n_tokens));
     flat = ggml_rms_norm(ctx, flat, norm_eps);
     ggml_tensor * mixes = ggml_mul_mat(ctx, hc_fn, flat); // [mix_hc, n_tokens]
-    ggml_tensor * split = ggml_dsv4_hc_split_sinkhorn(ctx, mixes, hc_scale, hc_base, n_hc, sinkhorn_iters, hc_eps);
+    // Xing's Sinkhorn puts eps in the denominator and applies none to `pre`; the dsv4
+    // entry point adds it to the value instead, which inflates legitimately-tiny entries
+    // (~1e-7) by 5-17x and Sinkhorn then amplifies that floor. See ggml_xing4_* variant.
+    ggml_tensor * split = ggml_xing4_hc_split_sinkhorn(ctx, mixes, hc_scale, hc_base, n_hc, sinkhorn_iters, hc_eps);
     ggml_tensor * pre = ggml_view_2d(ctx, split, n_hc, n_tokens, split->nb[1], 0);
     ggml_tensor * post = ggml_view_2d(ctx, split, n_hc, n_tokens, split->nb[1], n_hc * split->nb[0]);
     ggml_tensor * comb = ggml_view_2d(ctx, split, n_hc * n_hc, n_tokens, split->nb[1], 2 * n_hc * split->nb[0]);
@@ -70,6 +73,12 @@ static xing4_hc_mix xing4_hc_pre(
         comb = ggml_cont(ctx, comb);
     }
     comb = ggml_reshape_3d(ctx, comb, n_hc, n_hc, n_tokens); // [src_hc, dst_hc, n_tokens]
+    // ggml_dsv4_hc_expand contracts ne1 and indexes the destination stream by ne0, so it
+    // wants [dst_hc, src_hc]; the Sinkhorn writes dst*n_hc + src, which reshapes to
+    // [src_hc, dst_hc] (HF's comb[dst][src]). Swap the two hc axes so the op contracts the
+    // axis HF contracts. Verified arithmetically at layer 0: convention A reproduces HF's
+    // +0.0106, convention B reproduces the unpatched +(-0.0031). See patch header.
+    comb = ggml_cont(ctx, ggml_permute(ctx, comb, 1, 0, 2, 3));
     ggml_tensor * y = ggml_dsv4_hc_weighted_sum(ctx, x, pre);
     return { y, mixes, pre, post, comb };
 }

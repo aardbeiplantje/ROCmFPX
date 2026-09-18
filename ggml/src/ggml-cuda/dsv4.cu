@@ -83,6 +83,7 @@ static __global__ void dsv4_hc_split_sinkhorn_f32(
         const int n_hc,
         const int sinkhorn_iters,
         const float eps,
+        const int eps_in_denom,
         const int64_t n_rows,
         const int64_t mix_s0,
         const int64_t mix_s1,
@@ -97,7 +98,8 @@ static __global__ void dsv4_hc_split_sinkhorn_f32(
 
         for (int i = 0; i < n_hc; ++i) {
             const float z = mixes[r*mix_s1 + i*mix_s0] * pre_scale + base[i];
-            dst[r*dst_s1 + i*dst_s0] = dsv4_sigmoidf(z) + eps;
+            const float s = dsv4_sigmoidf(z);
+            dst[r*dst_s1 + i*dst_s0] = eps_in_denom ? s : s + eps;
         }
 
         for (int i = 0; i < n_hc; ++i) {
@@ -124,10 +126,10 @@ static __global__ void dsv4_hc_split_sinkhorn_f32(
                 row_sum += v;
             }
 
-            const float inv_sum = 1.0f / row_sum;
+            const float inv_sum = eps_in_denom ? 1.0f / (row_sum + eps) : 1.0f / row_sum;
             for (int src_hc = 0; src_hc < n_hc; ++src_hc) {
                 const int idx = src_hc + dst_hc*n_hc;
-                c[idx] = c[idx] * inv_sum + eps;
+                c[idx] = eps_in_denom ? c[idx] * inv_sum : c[idx] * inv_sum + eps;
             }
         }
 
@@ -398,11 +400,12 @@ void ggml_cuda_op_dsv4_hc_split_sinkhorn(ggml_backend_cuda_context & ctx, ggml_t
     const int n_hc           = ggml_get_op_params_i32(dst, 0);
     const int sinkhorn_iters = ggml_get_op_params_i32(dst, 1);
     const float eps          = ggml_get_op_params_f32(dst, 2);
+    const int   eps_in_denom = ggml_get_op_params_i32(dst, 3);
     const int64_t n_rows     = ggml_nrows(mixes);
 
     dsv4_hc_split_sinkhorn_f32<<<dsv4_nblocks(n_rows), CUDA_DSV4_BLOCK_SIZE, 0, ctx.stream()>>>(
         (const float *) mixes->data, (const float *) scale->data, (const float *) base->data, (float *) dst->data,
-        n_hc, sinkhorn_iters, eps, n_rows,
+        n_hc, sinkhorn_iters, eps, eps_in_denom, n_rows,
         mixes->nb[0] / (int64_t) sizeof(float), mixes->nb[1] / (int64_t) sizeof(float),
         dst->nb[0] / (int64_t) sizeof(float), dst->nb[1] / (int64_t) sizeof(float));
 }
