@@ -8682,6 +8682,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         exponent <<= 1;
     }
 #endif
+    for (int64_t ne0 : {617, 640, 768}) {
+        for (bool mask : {false, true}) {
+            test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {ne0, 1024, 1, 1}, mask));
+        }
+    }
     for (bool mask : {false, true}) {
         for (bool sinks : {false, true}) {
             for (float max_bias : {0.0f, 8.0f}) {

@@ -1,6 +1,7 @@
 #include "models.h"
 
 void llama_model_qwen3vl::load_arch_hparams(llama_model_loader & ml) {
+    ml.get_key("qwen3vl.hidden_states_only", hidden_states_only, false);
     ml.get_key(LLM_KV_NUM_DEEPSTACK_LAYERS, hparams.n_deepstack_layers, false);
     ml.get_key_or_arr(LLM_KV_ROPE_DIMENSION_SECTIONS, hparams.rope_sections, 4, true);
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -17,16 +18,15 @@ void llama_model_qwen3vl::load_arch_tensors(llama_model_loader &) {
 
     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
 
-    // output
-    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
-    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
-    // if output is NULL, init from the input tok embed
-    if (output == NULL) {
-        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
-    }
+    if (!hidden_states_only) {
+        output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+        output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+        if (output == NULL) {
+            output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
+        }
 
-    // output rerank head
-    cls_out = create_tensor(tn(LLM_TENSOR_CLS_OUT, "weight"), {n_embd, hparams.n_cls_out}, TENSOR_NOT_REQUIRED);
+        cls_out = create_tensor(tn(LLM_TENSOR_CLS_OUT, "weight"), {n_embd, hparams.n_cls_out}, TENSOR_NOT_REQUIRED);
+    }
 
     for (int i = 0; i < n_layer; ++i) {
         auto & layer = layers[i];
@@ -50,7 +50,7 @@ std::unique_ptr<llm_graph_context> llama_model_qwen3vl::build_arch_graph(const l
     return std::make_unique<graph>(*this, params);
 }
 
-llama_model_qwen3vl::graph::graph(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+llama_model_qwen3vl::graph::graph(const llama_model_qwen3vl & model, const llm_graph_params & params) : llm_graph_context(params) {
     const size_t n_deepstack_layers = hparams.n_deepstack_layers;
 
     const int64_t n_embd      = hparams.n_embd;
@@ -154,6 +154,12 @@ llama_model_qwen3vl::graph::graph(const llama_model & model, const llm_graph_par
     }
 
     cur = inpL;
+
+    if (model.hidden_states_only) {
+        res->t_embd = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
 
     cur = build_norm(cur,
             model.output_norm, NULL,
