@@ -7583,7 +7583,7 @@ static const ggml_type all_types[] = {
     GGML_TYPE_Q5_0, GGML_TYPE_Q5_1,
     GGML_TYPE_Q8_0,
     GGML_TYPE_Q1_0,
-    GGML_TYPE_MXFP4, GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_NVFP4,
+    GGML_TYPE_MXFP4, GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_Q4_0_ROCMI4, GGML_TYPE_NVFP4,
     GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_Q8_0_ROCMFPX,
     GGML_TYPE_Q2_K, GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_K, GGML_TYPE_Q5_K,
@@ -7601,7 +7601,7 @@ static const ggml_type base_types[] = {
     GGML_TYPE_Q4_0,
     GGML_TYPE_Q4_1, // for I8MM tests
     GGML_TYPE_Q4_K,
-    GGML_TYPE_MXFP4, GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_NVFP4, // TODO: or "other"
+    GGML_TYPE_MXFP4, GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_Q4_0_ROCMI4, GGML_TYPE_NVFP4, // TODO: or "other"
     GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_Q8_0_ROCMFPX,
     GGML_TYPE_IQ2_XXS
 };
@@ -8522,6 +8522,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     // gpt-oss issue with Vulkan mmq_id
     test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 2, false, 2880, 32, 2880));
 
+    // ROCmFP2 decode shapes that cross the AMD k >= 2048 threshold for
+    // backend-internal Q8_1 staging in the dense and routed vector paths.
+    for (int n : {1, 2, 4, 8}) {
+        test_cases.emplace_back(new test_mul_mat(
+                GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_F32, 64, n, 2048, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat_id(
+                GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_F32, 8, 2, false, 64, n, 2048));
+    }
+
     // HY3 exact routed-expert shapes for the native ROCmFPX low-bit kernels:
     // 192 experts, top-8, 4096 hidden, 1536 intermediate. Generic IQ/K types
     // use the standard correctness matrices below; their full tensors take
@@ -8673,6 +8682,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         exponent <<= 1;
     }
 #endif
+    for (int64_t ne0 : {617, 640, 768}) {
+        for (bool mask : {false, true}) {
+            test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {ne0, 1024, 1, 1}, mask));
+        }
+    }
     for (bool mask : {false, true}) {
         for (bool sinks : {false, true}) {
             for (float max_bias : {0.0f, 8.0f}) {
@@ -9002,7 +9016,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                 if (nh == 1 && hsk != 320 && hsk != 576) continue;
                                 for (int nr3 : { 1, 3, }) {
                                     if (hsk > 64 && nr3 > 1) continue; // skip broadcast for large head sizes
-                                    for (int nr2 : { 1, 4, 8, 12, 16, 20, 32 }) {
+                                    for (int nr2 : { 1, 4, 6, 8, 9, 12, 16, 20, 32 }) {
+                                        if (nr2 ==  6 && hsk != 128) continue; // Laguna S-2.1 full-attn layers (48 q heads / 8 kv heads)
+                                        if (nr2 ==  9 && hsk != 128) continue; // Laguna S-2.1 SWA layers (72 q heads / 8 kv heads)
                                         if (nr2 ==  8 && hsk != 192) continue;
                                         if (nr2 == 12 && hsk != 128) continue;
                                         if (nr2 == 16 && hsk != 192) continue;

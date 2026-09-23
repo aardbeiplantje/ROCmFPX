@@ -38,10 +38,27 @@ static double nmse(const std::vector<float> & a, const std::vector<float> & b) {
     return mse_a_b / mse_a_0;
 }
 
+// Scale tensors are semantically multipliers/divisors, so they must be centred
+// on 1 rather than 0. Drawing them from N(0, 1e-2) like ordinary weights puts
+// them arbitrarily close to zero, and MPT divides by one of them
+// (ffn.act.scales, see llama-graph.cpp: ggml_div(cur, act_scales)). A near-zero
+// draw turned that division into inf, which propagated to NaN logits and failed
+// the roundtrip check, because NaN != NaN is always true. That made the test
+// flaky in a seed-dependent way: ~1 seed in 12 for mpt.
+static bool is_scale_tensor(const char * name) {
+    const std::string n = name;
+    const auto ends_with = [&n](const char * suffix) {
+        const std::string s = suffix;
+        return n.size() >= s.size() && n.compare(n.size() - s.size(), s.size(), s) == 0;
+    };
+    return ends_with(".scale") || ends_with(".scales") || ends_with(".input_scale");
+}
+
 static void set_tensor_data(struct ggml_tensor * tensor, void * userdata) {
     std::hash<std::string> hasher;
     std::mt19937 gen(hasher(tensor->name) + *(const size_t *) userdata);
-    std::normal_distribution<float> dis(0.0f, 1.0e-2f);
+    const float mean = is_scale_tensor(tensor->name) ? 1.0f : 0.0f;
+    std::normal_distribution<float> dis(mean, 1.0e-2f);
 
     const int64_t ne = ggml_nelements(tensor);
     if (tensor->type == GGML_TYPE_F32) {
@@ -103,6 +120,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
             || arch == LLM_ARCH_DEEPSEEK4
             || arch == LLM_ARCH_GLM_DSA
             || arch == LLM_ARCH_KIMI_LINEAR
+            || arch == LLM_ARCH_BAILINGMOE3
             || arch == LLM_ARCH_MISTRAL4) {
         n_embd = 128;
         n_head = 1;
@@ -141,7 +159,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     ms.add_kv(LLM_KV_FULL_ATTENTION_INTERVAL, uint32_t(2));
 
     if (arch == LLM_ARCH_PLAMO2 || arch == LLM_ARCH_JAMBA || arch == LLM_ARCH_NEMOTRON_H || arch == LLM_ARCH_NEMOTRON_H_MOE ||
-            arch == LLM_ARCH_GRANITE_HYBRID || arch == LLM_ARCH_LFM2 || arch == LLM_ARCH_LFM2MOE || arch == LLM_ARCH_KIMI_LINEAR) {
+            arch == LLM_ARCH_GRANITE_HYBRID || arch == LLM_ARCH_LFM2 || arch == LLM_ARCH_LFM2MOE || arch == LLM_ARCH_KIMI_LINEAR || arch == LLM_ARCH_BAILINGMOE3) {
         GGML_ASSERT(n_layer >= 2);
         std::vector<uint32_t> n_head_per_layer;
         n_head_per_layer.reserve(n_layer);
@@ -160,6 +178,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
             || arch == LLM_ARCH_DEEPSEEK32
             || arch == LLM_ARCH_GLM_DSA
             || arch == LLM_ARCH_KIMI_LINEAR
+            || arch == LLM_ARCH_BAILINGMOE3
             || arch == LLM_ARCH_MISTRAL4) {
         ms.add_kv(LLM_KV_ATTENTION_KEY_LENGTH,       uint32_t(576));
         ms.add_kv(LLM_KV_ATTENTION_VALUE_LENGTH,     uint32_t(512));
@@ -238,6 +257,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     ms.add_kv(LLM_KV_SSM_TIME_STEP_RANK,        n_head);
     ms.add_kv(LLM_KV_SSM_GROUP_COUNT,           arch == LLM_ARCH_PLAMO2 ? 0 : uint32_t(2));
     ms.add_kv(LLM_KV_KDA_HEAD_DIM,              uint32_t(128));
+    ms.add_kv(LLM_KV_KDA_GATE_LOWER_BOUND,      0.9f);
     ms.add_kv(LLM_KV_WKV_HEAD_SIZE,             n_embd/n_head);
     ms.add_kv(LLM_KV_SHORTCONV_L_CACHE,         uint32_t(3));
 
@@ -350,6 +370,8 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_EXAONE_MOE:
         case LLM_ARCH_BAILINGMOE:
         case LLM_ARCH_BAILINGMOE2:
+        case LLM_ARCH_BAILINGMOE3:
+        case LLM_ARCH_COHERE2MOE:
         case LLM_ARCH_DOTS1:
         case LLM_ARCH_AFMOE:
         case LLM_ARCH_ERNIE4_5:
@@ -428,7 +450,7 @@ static bool arch_supported(const llm_arch arch) {
     }
 // FIXME some models are segfaulting with WebGPU:
 #ifdef GGML_USE_WEBGPU
-    if (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_KIMI_LINEAR) {
+    if (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_KIMI_LINEAR || arch == LLM_ARCH_BAILINGMOE3) {
         return false;
     }
 #endif // GGML_USE_WEBGPU

@@ -1,6 +1,6 @@
 # ROCmFPX for llama.cpp
 
-ROCmFPX adds experimental AMD-focused 3-, 4-, 6-, and 8-bit GGUF model-weight
+ROCmFPX adds experimental AMD-focused 2-, 3-, 4-, 6-, and 8-bit GGUF model-weight
 formats to `llama.cpp`, with CPU reference paths and accelerated HIP/ROCm and
 Vulkan kernels.
 
@@ -9,14 +9,73 @@ Vulkan kernels.
 > hardware, drivers, model, prompt, and quantization recipe; use BF16/F16 sources
 > for quality comparisons.
 
+## Disclosure
+
+**#AD #AMDAI**
+
+A huge thank you to AMD for providing the hardware that powers the ongoing
+development of ROCmFPX.
+
+The development system provided by AMD includes:
+
+- AMD Ryzen™ Threadripper™ 9980X
+- AMD Radeon™ AI PRO R9700 GPU
+- 128 GB ECC DDR5 Memory
+- 2 TB NVMe SSD
+
+This hardware enables me to continue developing, optimizing, benchmarking, and
+testing ROCmFPX for the community. AMD provided this hardware as part of a
+creator partnership. All development, benchmarks, code, testing, documentation,
+and opinions shared in this repository are my own.
+
+Thank you, AMD, for supporting the continued advancement of open AI development
+on Radeon hardware.
+
+**#AD #AMDAI**
+
+## Developer Update — ROCmFP2 Lands On Main (July 2026)
+
+ROCmFP2 is now available on the canonical `main` branch as
+`Q2_0_ROCMFPX`. It uses a 2.50-bpw block layout with an S40
+`{-4, -1, +1, +4}` codebook and dual UE4M3 scales. The smaller blocks reduce
+model storage and memory traffic compared with ROCmFP4. The 2.50-bpw figure
+describes native ROCmFP2 weight blocks; complete GGUF BPW can be higher because
+files also contain metadata and tensors stored in other types. The latest
+Vulkan dense and routed/MoE Q8_1 decode kernels landed through
+[PR #42](https://github.com/charlie12345/ROCmFPX/pull/42).
+
+[Download the current `main` source (ZIP)](https://github.com/charlie12345/ROCmFPX/archive/refs/heads/main.zip)
+or use the clone command in [Quick Start](#quick-start-strix-halo--gfx1151).
+Older tags and previously built binaries do not receive these updates
+automatically.
+
+| Current status | Formats | Notes |
+|---|---|---|
+| **Optimized and validated** | ROCmFP2, ROCmFP4 | Performance-tuned and benchmarked on the tested Strix Halo Vulkan and HIP/ROCm paths |
+| **Development preview** | ROCmFP3, ROCmFP6, ROCmFP8 | Included in the tree, but kernel optimization, routing, and model coverage are still being improved |
+
+Fresh matched Qwen3.6-35B-A3B tests used the same prompt and 256-token,
+non-speculative decode workload from an internal NVMe:
+
+| Backend | ROCmFP2 | ROCmFP4 STRIX_LEAN | ROCmFP2 advantage |
+|---|---:|---:|---:|
+| Vulkan0 | 90.30 tok/s | 76.20 tok/s | 18.50% |
+| ROCm0 (ROCm 7.14) | 75.90 tok/s | 67.50 tok/s | 12.44% |
+
+ROCmFP2 also passed exhaustive packed-codebook validation and dense/routed
+Vulkan kernel gates. These measurements demonstrate the benefit on the tested
+system, not a universal speed or quality guarantee. ROCmFP2 is more lossy than
+ROCmFP4, so compare important workloads against the BF16/F16 source.
+
 ## Why ROCmFPX?
 
-- **AMD-first weight formats:** ROCmFP3, ROCmFP4, ROCmFP6, and ROCmFP8 are real
-  GGUF model-weight quants, not just K/V-cache compression.
+- **AMD-first weight formats:** ROCmFP2, ROCmFP3, ROCmFP4, ROCmFP6, and
+  ROCmFP8 are real GGUF model-weight quants, not just K/V-cache compression.
 - **Native accelerated paths:** HIP/ROCm and Vulkan kernels are backed by CPU
   reference implementations for correctness testing.
-- **Speed and size choices:** ROCmFP4 is the speed-first 4-bit family; existing
-  Qwen comparisons put its files about 12% below the matched Q4_K_M size.
+- **Speed and size choices:** ROCmFP2 is the smallest optimized family, while
+  ROCmFP4 is the speed-first 4-bit family; existing Qwen comparisons put
+  ROCmFP4 files about 12% below the matched Q4_K_M size.
 - **Agent-aware presets:** coherent/agent recipes protect tensors that matter for
   code, JSON, tool calling, and structured output.
 - **Built-in MTP acceleration:** models with an MTP/NextN head—including
@@ -58,6 +117,116 @@ MTP gains are content-dependent: predictable code, JSON, and lists usually
 accept more draft tokens than creative prose. Treat the profiles above as tested
 starting points, not universal defaults.
 
+## Experimental ROCmI4 IU4 Acceleration (`gfx1151`)
+
+ROCmFPX includes an opt-in HIP/ROCm path for `Q4_0_ROCMI4` models on AMD
+Strix Halo. It keeps ROCmI4 weights packed as signed four-bit values and uses
+the native `v_wmma_i32_16x16x16_iu4` instruction for batched matrix
+multiplication. The feature is intended for prompt processing and MTP target
+verification; ordinary one-token-at-a-time generation continues to use MMVQ.
+
+The path is deliberately conservative:
+
+- `GGML_HIP_ROCMI4_W4A4` defaults to `OFF`.
+- Device code is compiled only under the exact `__gfx1151__` target.
+- Runtime dispatch also requires the exact `gfx1151` device identifier.
+- Other GPUs and default builds use the existing exact int8 MMQ path.
+- No backend-test tolerance is weakened when W4A4 is enabled.
+
+### Architecture and terminology
+
+These names describe different layers of the system:
+
+| Term | What it describes | Representation and role |
+|---|---|---|
+| **ROCmI4** | GGUF model-weight format | Signed four-bit weight codes, packed two per byte with block scales. This is the model stored on disk. |
+| **INT4** | Generic integer width | Four-bit integers: usually signed `-8..7` or unsigned `0..15`. INT4 does not imply a particular file format or GPU instruction. |
+| **IU4** | AMD WMMA instruction spelling | The gfx1151 integer matrix instruction consumes packed four-bit operands and accumulates into int32. It is a compute path, not a GGUF quant type. |
+| **INT8** | Eight-bit integer arithmetic | Wider integer range. The exact ROCmI4 MMQ fallback expands packed weight codes and quantizes activations for int8 computation. |
+| **FP8** | Eight-bit floating point | Uses sign, exponent, and mantissa, commonly E4M3 or E5M2. It has different range, precision, scaling, and kernels from INT4/IU4. |
+| **FP4** | Four-bit floating point | A floating-point encoding with exponent/mantissa behavior. It is not the same representation as ROCmI4 or signed INT4. |
+
+`W4A4` means four-bit weights and four-bit activations during the accelerated
+matrix multiply. The ROCmI4 weights themselves are unchanged; the additional
+loss comes from quantizing float activations directly to a signed four-bit grid.
+
+### Why MTP decode becomes faster
+
+Non-speculative decode evaluates one new token at a time and is mostly
+memory-bandwidth bound, so the W4A4 MMQ path does not materially change a plain
+`tg128` result. MTP changes the workload:
+
+1. The model's embedded NextN/MTP head proposes up to several future tokens.
+2. The target model verifies those proposed tokens together in a batch.
+3. Batched verification uses MMQ and therefore reaches the native IU4 path.
+4. Accepted draft tokens become output tokens without separate serial target
+   evaluations.
+
+On the development Ryzen AI MAX+ 395 / Radeon 8060S (`gfx1151`) system, a
+matched 10-task Qwen3.8-27B HumanEval pilot with strict MTP-16 measured:
+
+| Build | Mean decode | Aggregate decode | Prompt processing |
+|---|---:|---:|---:|
+| Exact ROCmI4 int8 MMQ | 41.63 tok/s | 40.90 tok/s | 283.83 tok/s |
+| ROCmI4 W4A4 IU4 MMQ | **49.40 tok/s** | **48.29 tok/s** | **318.83 tok/s** |
+
+The W4A4 run improved mean end-to-end decode by 18.66%. A separate full
+164-task run measured 44.39 tok/s mean and 45.23 tok/s median, with HumanEval
+pass@1 94.5% and HumanEval+ pass@1 91.5%. A 25-chunk perplexity sample was
+about 5.4% higher than the exact path, so W4A4 remains an explicit quality/
+speed tradeoff rather than a default.
+
+### Build the opt-in path
+
+Use a separate build directory so the exact build remains available:
+
+```bash
+cmake -S . -B build-rocmI4-w4a4 \
+  -DGGML_HIP=ON \
+  -DGGML_VULKAN=OFF \
+  -DCMAKE_HIP_ARCHITECTURES=gfx1151 \
+  -DGGML_HIP_ROCMI4_W4A4=ON \
+  -DLLAMA_BUILD_SERVER=ON
+cmake --build build-rocmI4-w4a4 --target llama-cli llama-server llama-bench -j 16
+```
+
+ROCm installations that do not identify Strix Halo natively may also need:
+
+```bash
+export HSA_OVERRIDE_GFX_VERSION=11.5.1
+```
+
+The server prints `ROCmI4 W4A4: enabled` when the accelerated path is active.
+If the compiled binary runs on an unsupported architecture, it reports the
+fallback and uses exact int8 MMQ.
+
+### Fast strict-MTP server profile
+
+For a Qwen model that contains its embedded MTP/NextN tensors:
+
+```bash
+build-rocmI4-w4a4/bin/llama-server \
+  -m model-Q4_0_ROCMI4.gguf \
+  --host 127.0.0.1 --port 8116 \
+  -dev ROCm0 -ngl 999 -np 1 -c 262144 \
+  -b 512 -ub 256 -t 16 -tb 32 -fa on \
+  -ctk f16 -ctv f16 --jinja \
+  --spec-type draft-mtp --spec-mtp-strict-qwen \
+  --spec-draft-device ROCm0 --spec-draft-ngl all \
+  --spec-draft-type-k f16 --spec-draft-type-v f16 \
+  --spec-draft-n-max 16 --spec-draft-n-min 0 \
+  --spec-draft-p-min 0.60 --spec-draft-backend-sampling
+```
+
+MTP acceptance and speed depend on content. Start with `n16 / p0.60` only for
+the qualified Qwen3.8 profile; reduce `--spec-draft-n-max` if another model or
+long-running workload shows lower acceptance or stability. Strict MTP preserves
+the selected target path's greedy decisions, but it does not remove the
+approximation introduced by W4A4 activation quantization.
+
+For implementation details, validation commands, and rollback instructions,
+see [`ggml/rocmfpx/ROCMI4.md`](ggml/rocmfpx/ROCMI4.md).
+
 ## Quick Start (Strix Halo / `gfx1151`)
 
 Four commands from clone to a running model. For other AMD GPUs, swap the build
@@ -82,6 +251,15 @@ build-strix-rocmfp4/bin/llama-cli \
 That is the whole loop: **build → quantize → run.** The sections below explain
 each format, how to convert an existing NVFP4 model, and how to squeeze more
 decode speed with speculative decoding.
+
+For the smallest optimized format, replace step 3 with:
+
+```bash
+build-strix-rocmfp4/bin/llama-quantize \
+  model-BF16.gguf model-ROCMFP2.gguf Q2_0_ROCMFPX
+```
+
+The same `llama-cli` command can then load `model-ROCMFP2.gguf`.
 
 For a model that contains an MTP/NextN head, add a tested starting profile:
 
@@ -121,27 +299,33 @@ build-strix-rocmfp4/bin/llama-cli \
 
 | Goal | Use | Why |
 |---|---|---|
-| **Smallest + speed-first decode** | `Q4_0_ROCMFP4_FAST` | 4.25 bpw, single scale/block — the speed-oriented default |
+| **Smallest optimized** | `Q2_0_ROCMFPX` | 2.50-bpw blocks with lower storage and memory traffic; validate quality for each model |
+| **Speed-first 4-bit** | `Q4_0_ROCMFP4_FAST` | 4.25 bpw, single scale/block — the speed-oriented 4-bit default |
 | **Balanced 4-bit** | `Q4_0_ROCMFP4` | 4.50 bpw, dual per-16 scale — a touch more precision |
 | **Agents / tools / JSON / code** | `Q4_0_ROCMFP4_COHERENT` (or any `*_AGENT`) | protects the tensors that keep structured output correct |
 | **Strix Halo tuned recipe** | `Q4_0_ROCMFP4_STRIX_LEAN` | attn-K/V quality recipe tuned on `gfx1151` |
-| **Higher quality reference** | `Q6_0_ROCMFPX` / `Q8_0_ROCMFPX` | 6.5 / 8.25 bpw ROCmFPX references |
-| **Smallest experimental** | `Q3_0_ROCMFPX` | 3.5 bpw — smallest, most lossy; test coherency first |
+| **Experimental gfx1151 IU4 + MTP** | `Q4_0_ROCMI4` with W4A4 enabled | native IU4 batched verification for higher speculative decode throughput; opt-in and lossy |
+| **Preview higher-bit references** | `Q6_0_ROCMFPX` / `Q8_0_ROCMFPX` | 6.5 / 8.25 bpw; optimization and model coverage are still in progress |
+| **Preview 3-bit** | `Q3_0_ROCMFPX` | 3.5 bpw; optimization and model coverage are still in progress |
 
-Rule of thumb: start with **`Q4_0_ROCMFP4_FAST`** for speed, or a **`*_COHERENT` /
-`*_AGENT`** preset if the model does tool-calling, JSON, or coding. Always compare
-against your BF16/F16 source for real quality checks.
+Rule of thumb: choose **`Q2_0_ROCMFPX`** when capacity and memory traffic matter
+most, or start with **`Q4_0_ROCMFP4_FAST`** for a less aggressive speed-oriented
+quant. Use a **`*_COHERENT` / `*_AGENT`** preset if the model does tool-calling,
+JSON, or coding. Always compare against your BF16/F16 source for real quality
+checks.
 
 ## What Is ROCmFPX?
 
 ROCmFPX is a family of GGUF model-weight quants:
 
-| Family name | GGUF preset | Role |
-|---|---|---|
-| ROCmFP3 | `Q3_0_ROCMFPX` | smallest experimental ROCmFPX weight format |
-| ROCmFP4 | `Q4_0_ROCMFP4`, `Q4_0_ROCMFP4_FAST` | promoted 4-bit ROCm family baseline |
-| ROCmFP6 | `Q6_0_ROCMFPX` | middle quality/size ROCmFPX weight format |
-| ROCmFP8 | `Q8_0_ROCMFPX` | high-quality ROCmFPX reference format |
+| Family name | GGUF preset | Role | Optimization status |
+|---|---|---|---|
+| ROCmFP2 | `Q2_0_ROCMFPX` | smallest ROCmFPX weight format; 2.50-bpw block layout | optimized and validated on tested Strix Halo paths |
+| ROCmFP3 | `Q3_0_ROCMFPX` | low-bit ROCmFPX weight format | development preview |
+| ROCmFP4 | `Q4_0_ROCMFP4`, `Q4_0_ROCMFP4_FAST` | promoted 4-bit ROCm family baseline | optimized and validated on tested Strix Halo paths |
+| ROCmI4 | `Q4_0_ROCMI4` | signed integer four-bit weights; optional native gfx1151 IU4/W4A4 MMQ | exact path by default; W4A4 is experimental and opt-in |
+| ROCmFP6 | `Q6_0_ROCMFPX` | middle quality/size ROCmFPX weight format | development preview |
+| ROCmFP8 | `Q8_0_ROCMFPX` | high-quality ROCmFPX reference format | development preview |
 
 Agent-specific versions are also available:
 
@@ -156,6 +340,53 @@ ROCmFPX is not a K/V-cache-only compression trick. It is a set of actual GGUF
 model-weight tensor formats with CPU reference paths plus ROCm/HIP and Vulkan
 kernel coverage.
 
+## Community Builds
+
+Models published by the community using ROCmFPX / ROCmFP4. Listed to help people
+find a build already quantised for their hardware, and to show the range of
+architectures the formats have been exercised on.
+
+Sizes are the total of all GGUF files in each repository (some ship several quant
+variants, a speculative drafter, or a vision projector, so this is not the download
+size of a single model file). Compiled from Hugging Face repository metadata; no
+build here has been benchmarked or endorsed by this project. Capped at three entries
+per publisher to keep the list representative.
+
+| Repository | Total GGUF size |
+|---|---|
+| [`christopher-kapic/AEON-Ultimate-ROCmFP4-Strix-Halo-GGUF`](https://huggingface.co/christopher-kapic/AEON-Ultimate-ROCmFP4-Strix-Halo-GGUF) | 72.3 GiB |
+| [`jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp`](https://huggingface.co/jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp) | 47.0 GiB |
+| [`Lucebox/DeepSeek-V4-Flash-0731-ROCmFP3`](https://huggingface.co/Lucebox/DeepSeek-V4-Flash-0731-ROCmFP3) | 186.8 GiB |
+| [`Geometric-AI/DeepSeek-V4-Flash-0731-ROCmFP3-MIX`](https://huggingface.co/Geometric-AI/DeepSeek-V4-Flash-0731-ROCmFP3-MIX) | 186.8 GiB |
+| [`cafonez/Escha-W2-35B-A3B-ROCmFP2`](https://huggingface.co/cafonez/Escha-W2-35B-A3B-ROCmFP2) | 12.2 GiB |
+| [`raulvidis/KAT-Coder-V2.5-Dev-ROCmFP4-STRIX-MTP-GGUF`](https://huggingface.co/raulvidis/KAT-Coder-V2.5-Dev-ROCmFP4-STRIX-MTP-GGUF) | 18.2 GiB |
+| [`jcbtc/Laguna-S-2.1-Chadrock-ROCmFP4-StrixKVSpine-V4-GGUF`](https://huggingface.co/jcbtc/Laguna-S-2.1-Chadrock-ROCmFP4-StrixKVSpine-V4-GGUF) | 60.9 GiB |
+| [`kingjones777/Laguna-S-2.1-ROCmFP4-STRIX_LEAN-GGUF`](https://huggingface.co/kingjones777/Laguna-S-2.1-ROCmFP4-STRIX_LEAN-GGUF) | 58.3 GiB |
+| [`kingjones777/Leanstral-1.5-119B-A6B-ROCmFP4-STRIX_LEAN-GGUF`](https://huggingface.co/kingjones777/Leanstral-1.5-119B-A6B-ROCmFP4-STRIX_LEAN-GGUF) | 59.0 GiB |
+| [`raulvidis/Ling-3.0-flash-ROCmFP4-STRIX-MTP-GGUF`](https://huggingface.co/raulvidis/Ling-3.0-flash-ROCmFP4-STRIX-MTP-GGUF) | 64.9 GiB |
+| [`christopher-kapic/MiMo-V2.5-ROCmFP4-GGUF`](https://huggingface.co/christopher-kapic/MiMo-V2.5-ROCmFP4-GGUF) | 433.4 GiB |
+| [`gsrunion/Ornith-1.0-35B-ROCmFP4-STRIX_LEAN-DFLASH-GGUF`](https://huggingface.co/gsrunion/Ornith-1.0-35B-ROCmFP4-STRIX_LEAN-DFLASH-GGUF) | 18.0 GiB |
+| [`gsrunion/Ornith-1.0-35B-ROCmFPX-GGUF`](https://huggingface.co/gsrunion/Ornith-1.0-35B-ROCmFPX-GGUF) | 98.6 GiB |
+| [`julianmb/Ornith-1.0-35B-ROCmFPX-StrixHalo`](https://huggingface.co/julianmb/Ornith-1.0-35B-ROCmFPX-StrixHalo) | 48.4 GiB |
+| [`vmlinux/Qwen3.5-122B-A10B-Heretic-ROCmFP4-iMatrix-GGUF`](https://huggingface.co/vmlinux/Qwen3.5-122B-A10B-Heretic-ROCmFP4-iMatrix-GGUF) | 62.8 GiB |
+| [`vmlinux/Qwen3.5-122B-A10B-ROCmFP4-iMatrix-GGUF`](https://huggingface.co/vmlinux/Qwen3.5-122B-A10B-ROCmFP4-iMatrix-GGUF) | 62.8 GiB |
+| [`lmcoleman/Qwen3.6-27B-Fable-Fusion-711-MTP-ROCmFPX-GGUF`](https://huggingface.co/lmcoleman/Qwen3.6-27B-Fable-Fusion-711-MTP-ROCmFPX-GGUF) | 69.2 GiB |
+| [`plunderstruck/Qwen3.6-27B-MTP-ROCmFP4-GGUF`](https://huggingface.co/plunderstruck/Qwen3.6-27B-MTP-ROCmFP4-GGUF) | 17.4 GiB |
+| [`philtheriver/Qwen3.6-27B-ROCmFPX`](https://huggingface.co/philtheriver/Qwen3.6-27B-ROCmFPX) | 85.5 GiB |
+| [`plunderstruck/Qwen3.6-35B-A3B-MTP-ROCmFP4-GGUF`](https://huggingface.co/plunderstruck/Qwen3.6-35B-A3B-MTP-ROCmFP4-GGUF) | 20.2 GiB |
+| [`gsrunion/Qwen3.6-35B-A3B-ROCmFP4-STRIX_LEAN-GGUF`](https://huggingface.co/gsrunion/Qwen3.6-35B-A3B-ROCmFP4-STRIX_LEAN-GGUF) | 18.6 GiB |
+| [`raulvidis/Qwen3.6-35B-A3B-ROCmFP4_FAST-GGUF`](https://huggingface.co/raulvidis/Qwen3.6-35B-A3B-ROCmFP4_FAST-GGUF) | 17.7 GiB |
+| [`plunderstruck/Qwen3.6-40B-Deckard-MTP-ROCmFP4-GGUF`](https://huggingface.co/plunderstruck/Qwen3.6-40B-Deckard-MTP-ROCmFP4-GGUF) | 22.4 GiB |
+| [`philtheriver/Qwopus3.6-27B-Coder-MTP-ROCmFPX`](https://huggingface.co/philtheriver/Qwopus3.6-27B-Coder-MTP-ROCmFPX) | 156.5 GiB |
+| [`jcbtc/qwopus3.6-27b-v2-chadrock-rocmfp4-mtp`](https://huggingface.co/jcbtc/qwopus3.6-27b-v2-chadrock-rocmfp4-mtp) | 13.8 GiB |
+| [`philtheriver/Qwopus3.6-27B-v2-MTP-ROCmFPX`](https://huggingface.co/philtheriver/Qwopus3.6-27B-v2-MTP-ROCmFPX) | 156.5 GiB |
+| [`lmcoleman/Tess-4-27B-ROCmFPX-GGUF`](https://huggingface.co/lmcoleman/Tess-4-27B-ROCmFPX-GGUF) | 160.9 GiB |
+| [`lmcoleman/ThinkingCap-Qwen3.6-27B-ROCmFPX-GGUF`](https://huggingface.co/lmcoleman/ThinkingCap-Qwen3.6-27B-ROCmFPX-GGUF) | 36.2 GiB |
+
+To add yours, open a PR editing this table. Please keep it to actual ROCmFPX /
+ROCmFP4 builds and use the `rocmfp4` or `strix-halo` tag on the model so it is
+discoverable on the Hub.
+
 ## Contributors And Credit
 
 This work builds on `llama.cpp`; upstream authors and contributors retain credit
@@ -166,7 +397,8 @@ ROCmFP4 and ROCmFPX experiment work in this repository is maintained by
 
 Additional ROCmFPX contributors:
 
-- `ciru-ai`: ROCmFPX FP3 Vulkan matvec/dequant speed path.
+- `ciru-ai`: ROCmFP2 core format/runtime and frozen codebook; ROCmFP3 Vulkan
+  matvec/dequant speed path.
 - Tom Turney / `PlunderStruck` / Aydan S.: TurboQuant `turbo3`/`turbo4`
   K/V-cache quantization paths for ROCm/HIP and Vulkan.
 
@@ -298,6 +530,13 @@ at runtime.
 
 Use BF16 or F16 GGUF sources. The wrapper keeps split GGUFs split by default.
 
+ROCmFP2:
+
+```bash
+build-strix-rocmfp4/bin/llama-quantize \
+  /path/to/model-BF16.gguf /path/to/model-Q2_0_ROCMFPX.gguf Q2_0_ROCMFPX
+```
+
 ROCmFP3:
 
 ```bash
@@ -329,6 +568,7 @@ SRC=/path/to/model-BF16.gguf OUT=/path/to/model-Q8_0_ROCMFPX.gguf \
 You can also call `llama-quantize` directly:
 
 ```bash
+build-strix-rocmfp4/bin/llama-quantize source.gguf out-q2.gguf Q2_0_ROCMFPX
 build-strix-rocmfp4/bin/llama-quantize source.gguf out-q3.gguf Q3_0_ROCMFPX
 build-strix-rocmfp4/bin/llama-quantize source.gguf out-q4.gguf Q4_0_ROCMFP4
 build-strix-rocmfp4/bin/llama-quantize source.gguf out-q6.gguf Q6_0_ROCMFPX
@@ -586,7 +826,7 @@ scripts/check-rocmfpx-agentic-smoke.sh
 
 ## Code Layout
 
-- `ggml/rocmfpx/` - ROCmFP3/ROCmFP6/ROCmFP8 reference formats
+- `ggml/rocmfpx/` - ROCmFP2/ROCmFP3/ROCmFP6/ROCmFP8 reference formats
 - `ggml/rocmfp4/` - ROCmFP4 reference path this family inherits from
 - `scripts/quantize-rocmfpx-agent.sh` - simple straight-vs-agent quant wrapper
 - `scripts/check-rocmfpx-agentic-smoke.sh` - OpenAI-compatible agent smoke test

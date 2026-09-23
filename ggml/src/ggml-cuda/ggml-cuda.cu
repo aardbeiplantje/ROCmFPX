@@ -296,6 +296,13 @@ static ggml_cuda_device_info ggml_cuda_init() {
                       id, prop.name, prop.gcnArchName, info.devices[id].cc & 0xffff,
                       device_vmm ? "yes" : "no", prop.warpSize,
                       (size_t)(prop.totalGlobalMem / (1024 * 1024)));
+#if defined(GGML_ROCMI4_W4A4) && GGML_ROCMI4_W4A4
+        if (GGML_CUDA_CC_IS_GFX1151(info.devices[id].cc)) {
+            GGML_LOG_WARN("  ROCmI4 W4A4: enabled for device %d (lossy prompt-processing path)\n", id);
+        } else {
+            GGML_LOG_INFO("  ROCmI4 W4A4: unsupported on device %d; using exact int8 MMQ\n", id);
+        }
+#endif
 #elif defined(GGML_USE_MUSA)
         // FIXME: Ensure compatibility with varying warp sizes across different MUSA archs.
         info.devices[id].warp_size = 32;
@@ -823,6 +830,44 @@ static void ggml_backend_cuda_buffer_memset_tensor(ggml_backend_buffer_t buffer,
     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
 }
 
+#if defined(GGML_USE_HIP)
+// A host->device copy that sources pageable, file-backed pages (an mmap'ed GGUF) can wedge
+// the ROCm SDMA path: the copy is queued but never signals completion, so the runtime spins
+// in hsa_signal_wait forever with the GPU idle. It only shows up once enough is in flight --
+// a 58 GiB model on gfx1151 stalls past ~30 GiB uploaded, a 17 GiB one never does. Stage such
+// copies through a pinned bounce buffer so the DMA engine only ever sees resident pages.
+#define GGML_CUDA_H2D_STAGE_THRESHOLD (1ull << 20)
+#define GGML_CUDA_H2D_STAGE_CHUNK     (32ull << 20)
+
+static bool ggml_cuda_memcpy_h2d_staged(void * dst, const void * src, size_t size, cudaStream_t stream) {
+    static std::mutex mutex;
+    static void *     staging = nullptr;
+    static bool       unavailable = false;
+
+    std::lock_guard<std::mutex> lock(mutex);
+
+    if (staging == nullptr) {
+        if (unavailable) {
+            return false;
+        }
+        if (cudaMallocHost(&staging, GGML_CUDA_H2D_STAGE_CHUNK) != cudaSuccess) {
+            (void) cudaGetLastError();
+            unavailable = true;
+            return false;
+        }
+    }
+
+    for (size_t off = 0; off < size; off += GGML_CUDA_H2D_STAGE_CHUNK) {
+        const size_t chunk = std::min<size_t>(GGML_CUDA_H2D_STAGE_CHUNK, size - off);
+        memcpy(staging, (const char *) src + off, chunk);
+        CUDA_CHECK(cudaMemcpyAsync((char *) dst + off, staging, chunk, cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+
+    return true;
+}
+#endif // defined(GGML_USE_HIP)
+
 static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *) buffer->context;
 
@@ -834,6 +879,12 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
         ggml_cuda_rocmfpx_fp6_expand_blocks(expanded.data(), (const uint8_t *) data, nblocks);
         CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + ggml_cuda_tensor_offset(tensor, offset), expanded.data(), expanded_size, cudaMemcpyHostToDevice, cudaStreamPerThread));
     } else {
+#if defined(GGML_USE_HIP)
+        if (size >= GGML_CUDA_H2D_STAGE_THRESHOLD &&
+            ggml_cuda_memcpy_h2d_staged((char *) tensor->data + offset, data, size, cudaStreamPerThread)) {
+            return;
+        }
+#endif // defined(GGML_USE_HIP)
         CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
     }
     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
@@ -1929,14 +1980,12 @@ static void ggml_cuda_op_mul_mat_cublas(
 
     if (supports_bf16 && src0->type == GGML_TYPE_BF16 && ggml_is_contiguous(src0) && row_diff == src0->ne[1]) {
         ggml_cuda_pool_alloc<nv_bfloat16> src1_as_bf16(ctx.pool(id));
-        if (src1->type != GGML_TYPE_BF16) {
-            const to_bf16_cuda_t to_bf16_cuda = ggml_get_to_bf16_cuda(src1->type);
-            GGML_ASSERT(to_bf16_cuda != nullptr);
-            size_t ne = src1_ncols*ne10;
-            src1_as_bf16.alloc(ne);
-            to_bf16_cuda(src1_ddf_i, src1_as_bf16.get(), ne, stream);
-        }
-        const nv_bfloat16 * src1_ptr = src1->type == GGML_TYPE_BF16 ? (const nv_bfloat16 *) src1_ddf_i : src1_as_bf16.get();
+        const to_bf16_cuda_t to_bf16_cuda = ggml_get_to_bf16_cuda(GGML_TYPE_F32);
+        GGML_ASSERT(to_bf16_cuda != nullptr);
+        size_t ne = src1_ncols*ne10;
+        src1_as_bf16.alloc(ne);
+        to_bf16_cuda(src1_ddf_i, src1_as_bf16.get(), ne, stream);
+        const nv_bfloat16 * src1_ptr = src1_as_bf16.get();
         const nv_bfloat16 * src0_ptr = (const nv_bfloat16 *)src0_dd_i;
         ggml_cuda_pool_alloc<nv_bfloat16> dst_bf16(ctx.pool(id), row_diff*src1_ncols);
 
@@ -1968,14 +2017,12 @@ static void ggml_cuda_op_mul_mat_cublas(
         const half * src0_ptr = src0->type == GGML_TYPE_F16 ? (const half *) src0_dd_i : src0_as_f16.get();
 
         ggml_cuda_pool_alloc<half> src1_as_f16(ctx.pool(id));
-        if (src1->type != GGML_TYPE_F16) {
-            const to_fp16_cuda_t to_fp16_cuda = ggml_get_to_fp16_cuda(src1->type);
-            GGML_ASSERT(to_fp16_cuda != nullptr);
-            size_t ne = src1_ncols*ne10;
-            src1_as_f16.alloc(ne);
-            to_fp16_cuda(src1_ddf_i, src1_as_f16.get(), ne, stream);
-        }
-        const half * src1_ptr = src1->type == GGML_TYPE_F16 ? (const half *) src1_ddf_i : src1_as_f16.get();
+        const to_fp16_cuda_t to_fp16_cuda = ggml_get_to_fp16_cuda(GGML_TYPE_F32);
+        GGML_ASSERT(to_fp16_cuda != nullptr);
+        size_t ne = src1_ncols*ne10;
+        src1_as_f16.alloc(ne);
+        to_fp16_cuda(src1_ddf_i, src1_as_f16.get(), ne, stream);
+        const half * src1_ptr = src1_as_f16.get();
 
         CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));
 
@@ -2016,7 +2063,6 @@ static void ggml_cuda_op_mul_mat_cublas(
         }
     } else {
         ggml_cuda_pool_alloc<float> src0_ddq_as_f32(ctx.pool(id));
-        ggml_cuda_pool_alloc<float> src1_ddq_as_f32(ctx.pool(id));
 
         if (src0->type != GGML_TYPE_F32) {
             const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(src0->type);
@@ -2024,15 +2070,9 @@ static void ggml_cuda_op_mul_mat_cublas(
             src0_ddq_as_f32.alloc(row_diff*ne00);
             to_fp32_cuda(src0_dd_i, src0_ddq_as_f32.get(), row_diff*ne00, stream);
         }
-        if (src1->type != GGML_TYPE_F32) {
-            const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(src1->type);
-            GGML_ASSERT(to_fp32_cuda != nullptr);
-            src1_ddq_as_f32.alloc(src1_ncols*ne10);
-            to_fp32_cuda(src1_ddf_i, src1_ddq_as_f32.get(), src1_ncols*ne10, stream);
-        }
 
         const float * src0_ddf_i = src0->type == GGML_TYPE_F32 ? (const float *) src0_dd_i : src0_ddq_as_f32.get();
-        const float * src1_ddf1_i = src1->type == GGML_TYPE_F32 ? (const float *) src1_ddf_i : src1_ddq_as_f32.get();
+        const float * src1_ddf1_i = src1_ddf_i;
 
         const float alpha = 1.0f;
         const float beta = 0.0f;
@@ -5551,6 +5591,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_MXFP4:
                     case GGML_TYPE_Q4_0_ROCMFP4:
                     case GGML_TYPE_Q4_0_ROCMFP4_FAST:
+                    case GGML_TYPE_Q4_0_ROCMI4:
                     case GGML_TYPE_Q3_0_ROCMFPX:
                     case GGML_TYPE_Q2_0_ROCMFPX:
                     case GGML_TYPE_Q6_0_ROCMFPX:
@@ -5594,6 +5635,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_Q8_0:
                     case GGML_TYPE_Q4_0_ROCMFP4:
                     case GGML_TYPE_Q4_0_ROCMFP4_FAST:
+                    case GGML_TYPE_Q4_0_ROCMI4:
                     case GGML_TYPE_Q3_0_ROCMFPX:
                     case GGML_TYPE_Q2_0_ROCMFPX:
                     case GGML_TYPE_Q6_0_ROCMFPX:
@@ -5802,7 +5844,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_NORM:
         case GGML_OP_RMS_NORM:
         case GGML_OP_L2_NORM:
-            return true;
+            // These kernels stride over rows but index the innermost dimension directly,
+            // so norm.cu asserts nb00 == ggml_type_size(src0). Claiming support for a
+            // permuted src0 aborts the process instead of falling back to another backend.
+            return ggml_is_contiguous_rows(op->src[0]);
         case GGML_OP_RMS_NORM_BACK:
             return ggml_is_contiguous(op->src[0]);
             break;

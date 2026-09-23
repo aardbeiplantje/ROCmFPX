@@ -116,6 +116,14 @@ function(llama_build_and_test source)
     set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
 endfunction()
 
+# This output policy test needs neither model weights nor a backend.
+add_executable(test-diffusion-output test-diffusion-output.cpp)
+llama_test(test-diffusion-output)
+
+# The entropy-bound row helper is independent of model weights and backends.
+add_executable(test-diffusion-entropy test-diffusion-entropy.cpp)
+llama_test(test-diffusion-entropy)
+
 # build test-tokenizer-0 target once and add many tests
 llama_build(test-tokenizer-0.cpp)
 

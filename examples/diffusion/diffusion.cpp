@@ -1,4 +1,5 @@
 #include "diffusion.h"
+#include "diffusion-entropy.h"
 
 #include "log.h"
 
@@ -470,7 +471,7 @@ void diffusion_generate_entropy_bound(llama_context *             ctx,
     std::vector<float>       sc_buffer((size_t) C * n_vocab, 0.0f); // previous step's raw logits, for self-cond
     std::vector<llama_token> argmax_canvas(C, 0);                  // model's best prediction = the output
     std::vector<llama_token> prev_argmax(C, -1);                  // stability history (-1 -> step 0 is unstable)
-    std::vector<float>       entropy(C);
+    std::vector<double>      entropy(C);
     std::vector<llama_token> denoiser(C);
     std::vector<int32_t>     order(C);
     std::vector<float>       u(C);                                // pre-drawn multinomial draws (determinism)
@@ -553,28 +554,10 @@ void diffusion_generate_entropy_bound(llama_context *             ctx,
         auto worker = [&](int32_t p0, int32_t p1) {
             for (int32_t pos = p0; pos < p1; pos++) {
                 const float * row = logits + (size_t) (logit_off + pos) * n_vocab;
-                float m = -INFINITY; int32_t amax = 0;
-                for (int32_t v = 0; v < n_vocab; v++) {
-                    const float z = row[v] * temp_inv;
-                    if (z > m) { m = z; amax = v; }
-                }
-                float Z = 0.0f;
-                for (int32_t v = 0; v < n_vocab; v++) {
-                    Z += expf(row[v] * temp_inv - m);
-                }
-                const float target = u[pos] * Z;
-                float   cum = 0.0f, H = 0.0f;
-                int32_t sampled = n_vocab - 1; bool picked = false;
-                for (int32_t v = 0; v < n_vocab; v++) {
-                    const float e = expf(row[v] * temp_inv - m);
-                    const float p = e / Z;
-                    if (p > 0.0f) { H -= p * logf(p); }
-                    cum += e;
-                    if (!picked && cum >= target) { sampled = v; picked = true; }
-                }
-                entropy[pos]       = H;
-                argmax_canvas[pos] = amax;
-                denoiser[pos]      = sampled;
+                const auto result = diffusion_eb_sample_row(row, n_vocab, temp_inv, u[pos]);
+                entropy[pos]       = result.entropy;
+                argmax_canvas[pos] = result.argmax;
+                denoiser[pos]      = result.sampled;
                 std::memcpy(sc_buffer.data() + (size_t) pos * n_vocab, row, n_vocab * sizeof(float));
             }
         };
@@ -601,7 +584,7 @@ void diffusion_generate_entropy_bound(llama_context *             ctx,
         }
 
         // renoise: accepted -> sampled token, rest -> fresh random; the displayed/output canvas is the argmax
-        float entropy_sum = 0.0f;
+        double entropy_sum = 0.0;
         for (int32_t pos = 0; pos < C; pos++) {
             current_canvas[pos]          = accepted[pos] ? denoiser[pos] : renoise[pos];
             output_tokens[n_input + pos] = argmax_canvas[pos];
@@ -610,7 +593,7 @@ void diffusion_generate_entropy_bound(llama_context *             ctx,
 
         // adaptive stop: argmax stable for stability_threshold steps AND confident (low mean entropy)
         held = (prev_argmax == argmax_canvas) ? held + 1 : 0;
-        const bool confident = (entropy_sum / (float) C) < params.confidence_threshold;
+        const bool confident = (entropy_sum / (double) C) < params.confidence_threshold;
         if (held >= params.stability_threshold && confident) { finished = true; }
         prev_argmax   = argmax_canvas;
         prev_temp_inv = temp_inv;

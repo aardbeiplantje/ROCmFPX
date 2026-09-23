@@ -125,6 +125,13 @@ if (GGML_HIP_NO_VMM)
     add_compile_definitions(GGML_HIP_NO_VMM)
 endif()
 
+if (GGML_HIP_ROCMI4_W4A4)
+    add_compile_definitions(GGML_ROCMI4_W4A4=1)
+    message(WARNING
+        "GGML_HIP_ROCMI4_W4A4 is a lossy, experimental ROCmI4 prefill path "
+        "verified only on gfx1151. Exact MMQ is used on other architectures.")
+endif()
+
 if (GGML_HIP_ROCWMMA_FATTN)
     add_compile_definitions(GGML_HIP_ROCWMMA_FATTN)
 endif()
@@ -167,4 +174,9 @@ endif()
 
 target_link_libraries(ggml-hip PRIVATE ggml-base hip::host roc::rocblas roc::hipblas)
 
-target_compile_options(ggml-hip PRIVATE "$<$<COMPILE_LANGUAGE:HIP>:-ffast-math>")
+# NOTE: do not add -ffast-math / -funsafe-math-optimizations here. Upstream
+# tried both and removed them (ggml-org/llama.cpp#25495, #26696): they imply
+# -fassociative-math, which reassociates FP reductions and can flip greedy
+# argmax on RDNA3.5, making MTP speculative decode diverge from the
+# non-speculative baseline. gfx1151 is RDNA3.5, and -ffinite-math-only also
+# breaks inf handling outright (EXPM1 returned NaN where the CPU returns inf).

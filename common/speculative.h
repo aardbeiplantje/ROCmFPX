@@ -36,6 +36,15 @@ struct common_speculative_draft_params {
     int32_t n_max = -1;
 
     llama_pos   n_past;
+
+    // RoPE position that the target model would assign to id_last's successor.
+    // Equals n_past for text-only prompts, but they diverge under M-RoPE: an
+    // image chunk occupies n_tokens KV slots while advancing position by only
+    // n_pos. Only the draft-mtp implementation consumes this; -1 means "caller
+    // supplied no M-RoPE-aware position", and consumers fall back to n_past so
+    // behaviour is byte-identical to before for every other caller and impl.
+    llama_pos   pos_next = -1;
+
     llama_token id_last;
 
     // TODO: remove in the future by keeping track of the prompt from the _begin() call and the consecutive accept calls
@@ -72,6 +81,12 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t
 bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
 bool common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
 bool common_speculative_state_required(const common_speculative * spec);
+
+// (optional) rewind the internal state to a previously seen position, so that
+// processing can resume from there after the target/draft memories rolled back
+// (bounded prompt-cache boundary salvage). Returns false when the position is
+// not recoverable.
+bool common_speculative_rollback_state(common_speculative * spec, llama_seq_id seq_id, llama_pos pos);
 
 // rebase per-sequence positions after the corresponding target/draft contexts shift
 void common_speculative_shift_state(common_speculative * spec, llama_seq_id seq_id, llama_pos delta);
