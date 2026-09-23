@@ -120,6 +120,10 @@ endfunction()
 add_executable(test-diffusion-output test-diffusion-output.cpp)
 llama_test(test-diffusion-output)
 
+# The entropy-bound row helper is independent of model weights and backends.
+add_executable(test-diffusion-entropy test-diffusion-entropy.cpp)
+llama_test(test-diffusion-entropy)
+
 # build test-tokenizer-0 target once and add many tests
 llama_build(test-tokenizer-0.cpp)
 
