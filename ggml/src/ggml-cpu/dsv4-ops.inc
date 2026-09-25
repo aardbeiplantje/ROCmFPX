@@ -19,6 +19,7 @@ void ggml_compute_forward_dsv4_hc_split_sinkhorn(
     const int n_hc           = ggml_get_op_params_i32(dst, 0);
     const int sinkhorn_iters = ggml_get_op_params_i32(dst, 1);
     const float eps          = ggml_get_op_params_f32(dst, 2);
+    const int   eps_in_denom  = ggml_get_op_params_i32(dst, 3); // 1 = HF/Xing placement
     const int64_t mix_hc     = mixes->ne[0];
     const int64_t n_rows     = ggml_nrows(mixes);
 
@@ -47,7 +48,8 @@ void ggml_compute_forward_dsv4_hc_split_sinkhorn(
 
         for (int i = 0; i < n_hc; ++i) {
             const float z = mix[i] * pre_scale + base_data[i];
-            out[i] = 1.0f / (1.0f + expf(-z)) + eps;
+            const float s = 1.0f / (1.0f + expf(-z));
+            out[i] = eps_in_denom ? s : s + eps; // HF applies no eps to `pre`
         }
 
         for (int i = 0; i < n_hc; ++i) {
@@ -76,10 +78,10 @@ void ggml_compute_forward_dsv4_hc_split_sinkhorn(
                 row_sum += v;
             }
 
-            const float inv_sum = 1.0f / row_sum;
+            const float inv_sum = eps_in_denom ? 1.0f / (row_sum + eps) : 1.0f / row_sum;
             for (int src_hc = 0; src_hc < n_hc; ++src_hc) {
                 const int idx = src_hc + dst_hc*n_hc;
-                c[idx] = c[idx] * inv_sum + eps;
+                c[idx] = eps_in_denom ? c[idx] * inv_sum : c[idx] * inv_sum + eps;
             }
         }
 

@@ -5520,11 +5520,35 @@ struct ggml_tensor * ggml_dsv4_hc_split_sinkhorn(
     ggml_set_op_params_i32(result, 0, n_hc);
     ggml_set_op_params_i32(result, 1, sinkhorn_iters);
     ggml_set_op_params_f32(result, 2, eps);
+    ggml_set_op_params_i32(result, 3, 0); // 0 = legacy dsv4 eps placement
 
     result->op     = GGML_OP_DSV4_HC_SPLIT_SINKHORN;
     result->src[0] = mixes;
     result->src[1] = scale;
     result->src[2] = base;
+
+    return result;
+}
+
+// ggml_xing4_hc_split_sinkhorn
+//
+// Same op, but selects HF's eps placement (op param 3 == 1):
+//   comb /= (comb.sum(dim) + eps)      instead of   comb = comb/sum + eps
+//   pre   = sigmoid(z)                 instead of   sigmoid(z) + eps
+// See Xing4_0HyperConnection.forward, modeling_xing4_0.py:473-482.
+
+struct ggml_tensor * ggml_xing4_hc_split_sinkhorn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * mixes,
+        struct ggml_tensor  * scale,
+        struct ggml_tensor  * base,
+        int                   n_hc,
+        int                   sinkhorn_iters,
+        float                 eps) {
+    struct ggml_tensor * result =
+        ggml_dsv4_hc_split_sinkhorn(ctx, mixes, scale, base, n_hc, sinkhorn_iters, eps);
+
+    ggml_set_op_params_i32(result, 3, 1); // 1 = HF/Xing eps placement
 
     return result;
 }
