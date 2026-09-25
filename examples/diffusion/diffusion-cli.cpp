@@ -2,6 +2,7 @@
 #include "chat.h"
 #include "common.h"
 #include "diffusion.h"
+#include "diffusion-output.h"
 #include "ggml-backend.h"
 #include "llama.h"
 #include "log.h"
@@ -343,36 +344,9 @@ int main(int argc, char ** argv) {
                 eb_params.stability_threshold, eb_params.confidence_threshold, eb_params.kv_cache ? "on" : "off");
     }
 
-    // Trim a denoised canvas: cut at the first end-of-generation token, or (checkpoints often emit no stop
-    // token) at the onset of a repetition loop (a token recurring at stride 1-2 for >= 6 steps).
-    auto trim_canvas = [&](const llama_token * canvas, size_t n) -> size_t {
-        size_t cut = n;
-        for (size_t i = 0; i < n; i++) {
-            if (llama_vocab_is_eog(vocab, canvas[i])) {
-                cut = i;
-                break;
-            }
-        }
-        for (size_t i = 0; i + 1 < cut; i++) {
-            bool loop = false;
-            for (size_t stride = 1; stride <= 2 && !loop; stride++) {
-                size_t reps = 0;
-                for (size_t j = i; j + stride < n && canvas[j] == canvas[j + stride]; j += stride) {
-                    reps++;
-                }
-                loop = reps >= 6;
-            }
-            if (loop) {
-                cut = i;
-                break;
-            }
-        }
-        return cut;
-    };
-
     // Generate one response for a chat-formatted prompt. Canvas models denoise a fixed canvas_length block
     // per pass; with --diffusion-blocks > 1 we run block-autoregressively, committing each block to the
-    // prefix and denoising the next until an end token, a repetition loop, the block budget, or the ubatch
+    // prefix and denoising the next until an end token, the block budget, or the ubatch
     // limit (the whole [prefix | canvas] must fit in one non-causal ubatch). Returns the trimmed text.
     auto run_turn = [&](const std::string & formatted_prompt) -> std::string {
         std::vector<llama_token> prefix = common_tokenize(vocab, formatted_prompt,
@@ -433,10 +407,11 @@ int main(int argc, char ** argv) {
             }
 
             const llama_token * canvas = output_tokens.data() + prefix_len;
-            const size_t        cut    = trim_canvas(canvas, (size_t) canvas_length);
+            const size_t        cut    = diffusion_output_length(canvas, (size_t) canvas_length,
+                    [&](llama_token token) { return llama_vocab_is_eog(vocab, token); });
             response.insert(response.end(), canvas, canvas + cut);
             if (cut < (size_t) canvas_length) {
-                break;  // end token or repetition loop: answer complete
+                break;  // end token: answer complete
             }
             prefix.insert(prefix.end(), canvas, canvas + cut);  // commit the block, denoise the next
         }

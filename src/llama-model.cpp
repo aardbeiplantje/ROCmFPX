@@ -246,8 +246,6 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_bailingmoe(params);
         case LLM_ARCH_BAILINGMOE2:
             return new llama_model_bailingmoe2(params);
-        case LLM_ARCH_BAILINGMOE3:
-            return new llama_model_bailingmoe3(params);
         case LLM_ARCH_SEED_OSS:
             return new llama_model_seed_oss(params);
         case LLM_ARCH_DOTS1:
@@ -314,14 +312,14 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_mimo2(params);
         case LLM_ARCH_KIMI_LINEAR:
             return new llama_model_kimi_linear(params);
-        case LLM_ARCH_BAILING_HYBRID:
-            return new llama_model_bailing_hybrid(params);
         case LLM_ARCH_MELLUM:
             return new llama_model_mellum(params);
         case LLM_ARCH_ZAYA:
             return new llama_model_zaya(params);
         case LLM_ARCH_STEP35:
             return new llama_model_step35(params);
+        case LLM_ARCH_SPARK2_5:
+            return new llama_model_spark2_5(params);
         default:
             throw std::runtime_error(std::string("unsupported model architecture: '") + llm_arch_name(arch) + "'");
     }
@@ -2584,6 +2582,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_QWEN3NEXT:
         case LLM_ARCH_MIMO2:
         case LLM_ARCH_STEP35:
+        case LLM_ARCH_SPARK2_5:
         case LLM_ARCH_HYV3:
         case LLM_ARCH_TALKIE:
         case LLM_ARCH_MELLUM:

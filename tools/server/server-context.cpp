@@ -9,6 +9,7 @@
 #include "build-info.h"
 #include "common.h"
 #include "diffusion.h"
+#include "diffusion-output.h"
 #include "llama.h"
 #include "../../src/llama-ext.h"
 #include "log.h"
@@ -3838,31 +3839,6 @@ private:
 
         const bool use_eb = params_base.diffusion.eb_mode != 2;
 
-        auto trim_canvas = [&](const llama_token * canvas, size_t n) -> size_t {
-            size_t cut = n;
-            for (size_t i = 0; i < n; i++) {
-                if (llama_vocab_is_eog(vocab, canvas[i])) {
-                    cut = i;
-                    break;
-                }
-            }
-            for (size_t i = 0; i + 1 < cut; i++) {
-                bool loop = false;
-                for (size_t stride = 1; stride <= 2 && !loop; stride++) {
-                    size_t reps = 0;
-                    for (size_t j = i; j + stride < n && canvas[j] == canvas[j + stride]; j += stride) {
-                        reps++;
-                    }
-                    loop = reps >= 6;
-                }
-                if (loop) {
-                    cut = i;
-                    break;
-                }
-            }
-            return cut;
-        };
-
         llama_tokens prefix = common_tokenize(vocab, formatted_prompt, true, true);
         if ((uint32_t) prefix.size() >= llama_n_ctx(ctx_tgt)) {
             throw std::runtime_error("input is longer than the server context");
@@ -3915,7 +3891,8 @@ private:
             }
 
             const llama_token * canvas = output_tokens.data() + prefix_len;
-            const size_t cut = trim_canvas(canvas, (size_t) canvas_length);
+            const size_t cut = diffusion_output_length(canvas, (size_t) canvas_length,
+                    [&](llama_token token) { return llama_vocab_is_eog(vocab, token); });
             response_tokens.insert(response_tokens.end(), canvas, canvas + cut);
             hit_token_limit = n_predict > 0 && (int32_t) response_tokens.size() >= n_predict;
             if (cut < (size_t) canvas_length || hit_token_limit) {
