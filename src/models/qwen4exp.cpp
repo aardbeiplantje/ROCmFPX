@@ -75,7 +75,12 @@ void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
         uint32_t full_attn_interval = 4;
         ml.get_key(LLM_KV_FULL_ATTENTION_INTERVAL, full_attn_interval, false);
         for (uint32_t i = 0; i < hparams.n_layer; ++i) {
-            hparams.recurrent_layer_arr[i] = (i < n_main_layers) && ((i + 1) % full_attn_interval != 0);
+            // Prediction layers beyond main layers must be recurrent (no attn_qkv weights)
+            if (i >= n_main_layers) {
+                hparams.recurrent_layer_arr[i] = true;
+            } else {
+                hparams.recurrent_layer_arr[i] = ((i + 1) % full_attn_interval != 0);
+            }
         }
     }
 
