@@ -180,12 +180,31 @@ llama_kv_cache::llama_kv_cache(
 
     const bool is_mla = hparams.is_mla();
 
-    const bool type_k_turbo = ggml_is_turbo_type(type_k);
-    const bool type_v_turbo = ggml_is_turbo_type(type_v);
-    const uint32_t turbo_boundary_layers = llama_env_u32("LLAMA_KV_TURBO_BOUNDARY_LAYERS", 0);
-    const bool protect_turbo_boundary_k = turbo_boundary_layers > 0 && type_k_turbo;
-    const bool protect_turbo_boundary_v = turbo_boundary_layers > 0 && type_v_turbo &&
+    bool type_k_turbo = ggml_is_turbo_type(type_k);
+    bool type_v_turbo = ggml_is_turbo_type(type_v);
+    uint32_t turbo_boundary_layers = llama_env_u32("LLAMA_KV_TURBO_BOUNDARY_LAYERS", 0);
+    bool protect_turbo_boundary_k = turbo_boundary_layers > 0 && type_k_turbo;
+    bool protect_turbo_boundary_v = turbo_boundary_layers > 0 && type_v_turbo &&
         llama_env_u32("LLAMA_KV_TURBO_BOUNDARY_V", 0) > 0;
+
+    // Check TurboQuant compatibility before entering layer loop - disable automatically if incompatible
+    if (type_k_turbo || type_v_turbo) {
+        bool k_compat = true, v_compat = true;
+        for (uint32_t il = 0; il < hparams.n_layer; ++il) {
+            if (!hparams.has_kv(il)) continue;
+            if (type_k_turbo && hparams.n_embd_head_k(il) != 128 && hparams.n_embd_head_k(il) != 256) {
+                k_compat = false; break;
+            }
+            if (type_v_turbo && hparams.n_embd_head_v(il) != 128 && hparams.n_embd_head_v(il) != 256) {
+                v_compat = false; break;
+            }
+        }
+        if (!k_compat || !v_compat) {
+            LLAMA_LOG_WARN("%s: TurboQuant disabled - model has incompatible head_dim (requires 128 or 256)\n", __func__);
+            type_k_turbo = false; type_v_turbo = false; protect_turbo_boundary_k = false; protect_turbo_boundary_v = false;
+            turbo_boundary_layers = 0;
+        }
+    }
 
     if (protect_turbo_boundary_k || protect_turbo_boundary_v) {
         LLAMA_LOG_WARN("%s: TurboQuant boundary protection enabled: first/last %u layers use q8_0 for%s%s cache\n",
@@ -246,17 +265,11 @@ llama_kv_cache::llama_kv_cache(
 
         if (type_k_layer == GGML_TYPE_TURBO3_0 || type_k_layer == GGML_TYPE_TURBO4_0) {
             const uint32_t n_embd_head_k = hparams.n_embd_head_k(il);
-            if (n_embd_head_k != 128 && n_embd_head_k != 256) {
-                LLAMA_LOG_ERROR("%s: TurboQuant requires head_dim=128 or 256, got %d (layer %d)\n", __func__, n_embd_head_k, il);
-                throw std::runtime_error("turbo types require head_dim=128 or 256");
-            }
+            GGML_ASSERT((n_embd_head_k == 128 || n_embd_head_k == 256) && "TurboQuant requires head_dim=128 or 256");
         }
         if (type_v_layer == GGML_TYPE_TURBO3_0 || type_v_layer == GGML_TYPE_TURBO4_0) {
             const uint32_t n_embd_head_v = hparams.n_embd_head_v(il);
-            if (n_embd_head_v != 128 && n_embd_head_v != 256) {
-                LLAMA_LOG_ERROR("%s: TurboQuant requires head_dim=128 or 256, got %d (layer %d)\n", __func__, n_embd_head_v, il);
-                throw std::runtime_error("turbo types require head_dim=128 or 256");
-            }
+            GGML_ASSERT((n_embd_head_v == 128 || n_embd_head_v == 256) && "TurboQuant requires head_dim=128 or 256");
         }
 
         const bool has_k = true;
