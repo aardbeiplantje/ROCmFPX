@@ -1967,14 +1967,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(experts, "ffn_moe_down_biased", il);
     }
 
-    // apply per-expert scale2 to down
-    if (down_exps_s) {
-        ggml_tensor * s = ggml_reshape_3d(ctx0, down_exps_s, 1, n_expert, 1);
-        s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
-        s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
-        experts = ggml_mul(ctx0, experts, s);
-        cb(experts, "ffn_moe_down_scaled", il);
-    }
+    // rocm-hip oracle patch (2026-10-25): removed the fork's second "per-expert scale2" multiply here.
+    // build_lora_mm_id(down_exps, ..., down_exps_s) above already applies down_exps_s, as upstream llama.cpp
+    // does once; applying it again squared Gemma-4's per-expert scales (ffn_down_exps.scale).
 
     if (!weight_before_ffn && !weight_before_down) {
         experts = ggml_mul(ctx0, experts, weights);
